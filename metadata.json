@@ -1,0 +1,6 @@
+{
+  "name": "Walftech Manifest & Lua Generator",
+  "description": "Search Steam games by name or AppID, inspect DRM and depots, extract DLCs, and generate .lua scripts and .manifest configuration bundles.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
