@@ -588,6 +588,144 @@ async function startServer() {
     }
   });
 
+  let featuredAppsCache: {items: any[]; expiresAt: number} | null = null;
+
+  app.get('/api/steam/gamelist', async (req, res) => {
+    const q = String(req.query.q ?? '').trim();
+    const filter = String(req.query.filter ?? 'featured');
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = Math.min(48, Math.max(6, Number(req.query.limit) || 24));
+
+    try {
+      await ensureCatalogLoaded().catch(() => {});
+
+      if (q) {
+        const hits = searchCatalog(q, 60);
+        const start = (page - 1) * limit;
+        const paged = hits.slice(start, start + limit).map((h) => ({
+          appid: h.appid,
+          name: h.name,
+          category: h.aliases ? 'Classic / Delisted' : 'Steam Catalog',
+          headerImage: `https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/${h.appid}/header.jpg`,
+        }));
+        return res.json({
+          total: hits.length,
+          page,
+          limit,
+          items: paged,
+        });
+      }
+
+      if (filter === 'classic') {
+        const start = (page - 1) * limit;
+        const paged = CLASSIC_DELISTED_APPS.slice(start, start + limit).map((h) => ({
+          appid: h.appid,
+          name: h.name,
+          category: 'Classic / Delisted',
+          headerImage: `https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/${h.appid}/header.jpg`,
+        }));
+        return res.json({
+          total: CLASSIC_DELISTED_APPS.length,
+          page,
+          limit,
+          items: paged,
+        });
+      }
+
+      if (filter === 'catalog') {
+        const source = fullCatalog.length > 0 ? fullCatalog : CLASSIC_DELISTED_APPS;
+        const start = (page - 1) * limit;
+        const paged = source.slice(start, start + limit).map((h) => ({
+          appid: h.appid,
+          name: h.name,
+          category: 'Steam Catalog',
+          headerImage: `https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/${h.appid}/header.jpg`,
+        }));
+        return res.json({
+          total: source.length,
+          page,
+          limit,
+          items: paged,
+        });
+      }
+
+      // Default: 'featured' from live Steam Store featuredcategories
+      if (!featuredAppsCache || Date.now() > featuredAppsCache.expiresAt) {
+        const featRes = await fetch(
+          'https://store.steampowered.com/api/featuredcategories/?cc=US&l=english',
+          {
+            headers: {'User-Agent': 'Walftech-LuaGen/1.0'},
+            signal: AbortSignal.timeout(5000),
+          }
+        ).catch(() => null);
+
+        const combined: any[] = [];
+        const seen = new Set<number>();
+
+        if (featRes && featRes.ok) {
+          const json: any = await featRes.json().catch(() => null);
+          const buckets = [
+            {key: 'top_sellers', label: 'Top Sellers'},
+            {key: 'new_releases', label: 'New Releases'},
+            {key: 'specials', label: 'Specials'},
+          ];
+          for (const b of buckets) {
+            const arr = Array.isArray(json?.[b.key]?.items) ? json[b.key].items : [];
+            for (const item of arr) {
+              const id = Number(item.id);
+              if (!id || seen.has(id)) continue;
+              seen.add(id);
+              combined.push({
+                appid: id,
+                name: String(item.name),
+                category: b.label,
+                headerImage: String(
+                  item.header_image ??
+                    `https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/${id}/header.jpg`
+                ),
+                priceFormatted:
+                  item.final_price === 0
+                    ? 'Free'
+                    : item.final_price
+                      ? `$${(Number(item.final_price) / 100).toFixed(2)}`
+                      : undefined,
+              });
+            }
+          }
+        }
+
+        // Append classics if featured feed had few items
+        for (const c of CLASSIC_DELISTED_APPS.slice(0, 12)) {
+          if (!seen.has(c.appid)) {
+            seen.add(c.appid);
+            combined.push({
+              appid: c.appid,
+              name: c.name,
+              category: 'Classic / Delisted',
+              headerImage: `https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/${c.appid}/header.jpg`,
+            });
+          }
+        }
+
+        featuredAppsCache = {
+          items: combined,
+          expiresAt: Date.now() + CACHE_TTL_MS,
+        };
+      }
+
+      const allFeatured = featuredAppsCache.items;
+      const start = (page - 1) * limit;
+      return res.json({
+        total: allFeatured.length,
+        page,
+        limit,
+        items: allFeatured.slice(start, start + limit),
+      });
+    } catch (err: any) {
+      return res.status(502).json({error: err?.message || 'Failed to load gamelist'});
+    }
+  });
+
   app.get('/api/steam/app/:appid', async (req, res) => {
     const rawId = String(req.params.appid ?? '');
     if (!/^\d+$/.test(rawId)) {
